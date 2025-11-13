@@ -1,0 +1,82 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPO: ${{ vars.ECR_REPO }}        # MUST BE staging repo URL
+  IMAGE_TAG: ${{ github.sha }}
+  TF_WORKING_DIR: infra
+
+jobs:
+
+  # ---------------------------------------------------
+  # 1️⃣ BUILD & PUSH DOCKER IMAGE TO STAGING ECR
+  # ---------------------------------------------------
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS auth
+        run: aws sts get-caller-identity
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        run: docker build -t $ECR_REPO:$IMAGE_TAG -f app/Dockerfile app
+
+      - name: Push image to ECR
+        run: docker push $ECR_REPO:$IMAGE_TAG
+
+
+  # ---------------------------------------------------
+  # 2️⃣ DEPLOY TO STAGING USING TERRAFORM
+  # ---------------------------------------------------
+  deploy-staging:
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: staging
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -reconfigure -input=false
+
+      - name: Terraform Apply (staging)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -auto-approve -input=false \
+            -var-file=env/staging.tfvars \
+            -var "image_tag=${{ env.IMAGE_TAG }}"
